@@ -1,0 +1,7 @@
+matplotlib
+
+tensorflow_io
+tensorflow
+numpy
+os
+glob

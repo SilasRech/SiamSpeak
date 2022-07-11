@@ -1,0 +1,25 @@
+First of all, you need to install keras and tensorflow. 
+
+In additon, you need to install other dependencies: sklearn and pickle.
+
+You need to extract the features and save them as pickle file. 
+I used spectrogram as feature here but it can be replaced with other feature types.
+
+1. Store your audio filenames in file: training_labels.lst 
+   In this file, the first column is filename and second column is the label. 
+
+2. The validation trials are in file: VoxCeleb-1_validation_trials.txt
+
+3. To train a cnn model in keras, run:
+   "python3 CNN.py --train 1 --predict 0"
+   
+   a. This will load data from the path you provide in the CNN.py script. 
+   b. It will train the model.
+   c. It will save the trained model in the same directory.
+
+4. To extract speaker embeddings using the trained model and score trials, run:
+   "python3 CNN.py --train 0 --predict 1"
+   The scores will be saved in text file: scores_VoxCeleb-1
+ 
+5. Finally to compute Equal Error Rate, type:
+   "python3 EER.py scores_VoxCeleb-1"
