@@ -3,6 +3,7 @@ import os
 import tensorflow as tf
 import tensorflow_io as tfio
 import matplotlib.pyplot as plt
+import librosa
 
 
 def plot_tensor(tensor, mode):
@@ -34,7 +35,7 @@ def load_audio_as_augmented_mel(path):
 
     # Transform to Mel Scale
     spec = tfio.audio.spectrogram(
-        audio_nomean, nfft=1024, window=window_length, stride=window_length)
+        audio_nomean, nfft=1024, window=512, stride=512)
 
     mel_spec = tfio.audio.melscale(
         spec, rate=audio_rate, mels=128, fmin=0, fmax=8000)
@@ -46,12 +47,12 @@ def load_audio_as_augmented_mel(path):
 
     time_mask = tfio.audio.time_mask(db_mel, param=10)
 
-    if DEBUG == 1:
-        plot_tensor(audio_nomean, "time")
-        plot_tensor(tf.math.log(spec), "freq")
-        plot_tensor(db_mel, "freq")
-        plot_tensor(freq_mask, "freq")
-        plot_tensor(time_mask, "freq")
+    #if DEBUG == 1:
+    #    plot_tensor(audio_nomean, "time")
+    #    plot_tensor(tf.math.log(spec), "freq")
+    #    plot_tensor(db_mel, "freq")
+    #    plot_tensor(freq_mask, "freq")
+    #    plot_tensor(time_mask, "freq")
 
     return freq_mask, time_mask
 
@@ -61,9 +62,9 @@ def get_id(path):
     :param path: Path to audiofile in the VoxCeleb Database
     :return: ID of the speaker of the audiofile (the name of the folder that contains the ID)
     """
-    path = os.path.normpath(path)
-    path_split = path.split(os.sep)
-    return path_split[-3]
+    split_tensor = tf.strings.split(path, sep="/")
+
+    return split_tensor[-3]
 
 
 if __name__ == "__main__":
@@ -75,8 +76,15 @@ if __name__ == "__main__":
     test_database = glob.glob("/work/t405/T40571/sounds/VoxCeleb/vox1_dev_wav/wav/**/*.wav", recursive=True)
     test_database = test_database[:10]
 
-    dataset = tf.data.Dataset.from_tensor_slices(test_database)
-    dataset = dataset.map(load_audio_as_augmented_mel)
+    dataset_data = tf.data.Dataset.from_tensor_slices(test_database)
+    dataset_data = dataset_data.map(load_audio_as_augmented_mel)
+
+    dataset_label = tf.data.Dataset.from_tensor_slices(test_database)
+    dataset_label = dataset_label.map(get_id)
+
+    dataset3 = tf.data.Dataset.zip((dataset_data, dataset_label))
+
+    processed_features = dataset3.get_single_element()
 
     #  Test if path is working
     if len(test_database) == 0:
