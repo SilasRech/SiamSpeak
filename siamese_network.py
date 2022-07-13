@@ -56,7 +56,6 @@ def stacked_ResBlocks(x):
 
 def backbone(input):
 
-
     x = tf.keras.layers.Conv2D(64, kernel_size=(3, 3), strides=(1, 1), padding="same")(input)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Activation("relu")(x)
@@ -65,11 +64,11 @@ def backbone(input):
     x = tf.keras.layers.Flatten()(x)
 
     # MLP Projection Layer
-    x = tf.keras.layers.Dense(2048, activation='relu')(x)
+    x = tf.keras.layers.Dense(512, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(2048, activation='relu')(x)
+    x = tf.keras.layers.Dense(512, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(2048)(x)
+    x = tf.keras.layers.Dense(512)(x)
     output = tf.keras.layers.BatchNormalization()(x)
 
     return tf.keras.Model(inputs=input, outputs=output)
@@ -78,7 +77,7 @@ def backbone(input):
 def prediction_net(input):
     prediction_layer = tf.keras.layers.Dense(512, activation='relu')(input)
     prediction_layer = tf.keras.layers.BatchNormalization()(prediction_layer)
-    prediction_layer = tf.keras.layers.Dense(2048)(prediction_layer)
+    prediction_layer = tf.keras.layers.Dense(2048, name="OutputPrediction")(prediction_layer)
 
     return tf.keras.Model(inputs=input, outputs=prediction_layer)
 
@@ -89,20 +88,22 @@ def build_network(input_shape):
     input_one = tf.keras.Input(shape=input_shape)
     input_a = tf.keras.Input(shape=input_shape)
     input_b = tf.keras.Input(shape=input_shape)
-    input_pred = tf.keras.Input(shape=(2048, ))
+    input_pred = tf.keras.Input(shape=(512, ))
 
     backbone_net = backbone(input_one)
 
-    #backbone_net.summary()
+    backbone_net.summary()
 
     output1 = backbone_net(input_a)
     output2 = backbone_net(input_b)
 
-    pred_net = prediction_net(input_pred)
-    #pred_net.summary()
+    prediction_layer1 = tf.keras.layers.Dense(128, activation='relu')(output1)
+    prediction_layer1 = tf.keras.layers.BatchNormalization()(prediction_layer1)
+    pred1 = tf.keras.layers.Dense(512, name="OutputPrediction1")(prediction_layer1)
 
-    pred1 = pred_net(output1)
-    pred2 = pred_net(output2)
+    prediction_layer2 = tf.keras.layers.Dense(128, activation='relu')(output2)
+    prediction_layer2 = tf.keras.layers.BatchNormalization()(prediction_layer2)
+    pred2 = tf.keras.layers.Dense(512, name="OutputPrediction2")(prediction_layer2)
 
     return tf.keras.Model([input_a, input_b], [output1, output2, pred1, pred2])
 

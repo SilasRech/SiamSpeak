@@ -7,6 +7,7 @@ from tools import spec_augment
 import tensorflow as tf
 import siamese_network as sn
 import tensorboard
+from sklearn.preprocessing import OneHotEncoder
 
 
 def plot_tensor(spec, mode):
@@ -122,6 +123,24 @@ def grad(model, inputs):
     return loss_value, tape.gradient(loss_value, model.trainable_variables)
 
 
+def linear_prediction(input_shape):
+    # MLP Projection Layer
+    x = tf.keras.layers.Dense(2048, activation='relu')(input_shape)
+    x = tf.keras.layers.BatchNormalization()(x)
+    pred_class = tf.keras.layers.Dense(7, activation='softmax')(x)
+
+    return tf.keras.Model(inputs=input_shape, outputs=pred_class)
+
+
+def saveToTFRecords(files, name, tffilesize=100, audio_length=2.5, ):
+
+    for k in range(len(files)//tffilesize):
+        one_TFfile = files[k*tffilesize:(k+1)*tffilesize]
+        train_features_1, train_features_2, y_train = extract_features(one_TFfile, audio_length)
+        
+
+
+
 if __name__ == "__main__":
 
     DEBUG = 0
@@ -147,13 +166,13 @@ if __name__ == "__main__":
 
         # Split into 80% Training Files
 
-        train_files = file_list[:1000]
-        test_files = file_list[1020:1100]
+        #train_files = file_list[:1000]
+        #test_files = file_list[1020:1100]
 
-        #split_index = int(0.8 * len(file_list))
+        split_index = int(0.8 * len(file_list))
 
-        #train_files = file_list[:split_index]
-        #test_files = file_list[split_index:]
+        train_files = file_list[:split_index]
+        test_files = file_list[split_index:]
 
         print('Extracting Training Features')
         train_features_1, train_features_2, y_train = extract_features(train_files, audio_length)
@@ -161,9 +180,9 @@ if __name__ == "__main__":
 
         test_features_1, test_features_2, y_test = extract_features(test_files, audio_length)
 
-        np.savez('VoxCeleb_Feature_for_Siamese_Training.npz', x_train1=train_features_1, x_train2=train_features_2, x_test1=test_features_1, x_test2=test_features_2, y_train=y_train, y_test=y_test)
+        np.savez('VoxCeleb_Feature_for_Siamese_TrainingFullDataSet.npz', x_train1=train_features_1, x_train2=train_features_2, x_test1=test_features_1, x_test2=test_features_2, y_train=y_train, y_test=y_test)
     else:
-        with np.load('VoxCeleb_Feature_for_Siamese_Training.npz') as data:
+        with np.load('VoxCeleb_Feature_for_Siamese_TrainingFullDataSet.npz') as data:
             train_examples1 = data['x_train1']
             train_examples2 = data['x_train2']
 
@@ -173,28 +192,30 @@ if __name__ == "__main__":
             train_labels = data['y_train']
             test_labels = data['y_test']
 
+        enc = OneHotEncoder()
+        hot_train_labels = enc.fit_transform(np.reshape(train_labels, (-1, 1))).toarray()
+
         train_dataset_x = tf.data.Dataset.from_tensor_slices((train_examples1, train_examples1))
-        train_dataset_y = tf.data.Dataset.from_tensor_slices(train_labels)
+        train_dataset_y = tf.data.Dataset.from_tensor_slices(hot_train_labels)
         dataset_train = tf.data.Dataset.zip((train_dataset_x, train_dataset_y))
 
-        test_dataset_x = tf.data.Dataset.from_tensor_slices((test_examples1, test_examples2))
-        test_dataset_y = tf.data.Dataset.from_tensor_slices(test_labels)
-        dataset_test = tf.data.Dataset.zip((test_dataset_x, test_dataset_y))
+        BATCH_SIZE = 1
+        SHUFFLE_BUFFER_SIZE = 1
 
-        BATCH_SIZE = 20
-        SHUFFLE_BUFFER_SIZE = 16
-
-        train_dataset = dataset_train.shuffle(SHUFFLE_BUFFER_SIZE).batch(BATCH_SIZE)
-        test_dataset = dataset_test.batch(BATCH_SIZE)
+        train_dataset = dataset_train.shuffle(SHUFFLE_BUFFER_SIZE).batch(BATCH_SIZE).prefetch(1, tf.data.AUTOTUNE)
 
         siamese_net = sn.build_network(input_shape=input_shape)
+        siamese_net.summary()
+
+        simple_predictor = linear_prediction(tf.keras.Input((512)))
+        simple_predictor.compile(optimizer="Adam", loss="categorical_crossentropy", metrics=["acc"])
 
         optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.01)
 
         train_loss_results = []
         train_accuracy_results = []
 
-        num_epochs = 200
+        num_epochs = 10
 
         log_dir = os.path.join("logs", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         # TC = tf.keras.callbacks.TensorBoard(log_dir, histogram_freq=1)
@@ -215,9 +236,6 @@ if __name__ == "__main__":
 
                 # Track progress
                 epoch_loss_avg.update_state(loss_value)  # Add current batch loss
-                # Compare predicted label to actual label
-                # training=True is needed only if there are layers with different
-                # behavior during training versus inference (e.g. Dropout).
 
             with summary_writer.as_default():
                 tf.summary.scalar('epoch_loss_avg', epoch_loss_avg.result(), step=optimizer.iterations)
@@ -225,6 +243,27 @@ if __name__ == "__main__":
             print('Average Loss in Epoch {}'.format(epoch_loss_avg.result().numpy()))
             train_loss_results.append(epoch_loss_avg.result())
             test = 1
+        for x, y in train_dataset:
+            predictions = siamese_net(x)
+
+            simple_predictor.fit(predictions[0], y, batch_size=20, epochs=10)
+
+        #test_dataset_x = tf.data.Dataset.from_tensor_slices((test_examples1, test_examples2))
+        #test_dataset_y = tf.data.Dataset.from_tensor_slices(test_labels)
+        #ataset_test = tf.data.Dataset.zip((test_dataset_x, test_dataset_y))
+
+        #test_dataset = dataset_test.batch(BATCH_SIZE)
+
+        # Evaluation
+        model_new = tf.keras.Model(inputs=siamese_net.get_input_at(0), outputs=siamese_net.get_layer('OutputPrediction1').output)
+        predictions = siamese_net(train_examples1)
+
+        train_dataset_prediction = tf.data.Dataset.from_tensor_slices(predictions, hot_train_labels)
+
+
+
+
     # Testing
+
     #tensorboard --log dirlogs
     x = 1
