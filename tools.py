@@ -1,13 +1,10 @@
 import random
-import argparse
-
 import numpy as np
 import numpy.linalg as nl
-import matplotlib.pyplot as plt
-import librosa
-import librosa.display
 from scipy import interpolate
 from scipy.spatial.distance import pdist, cdist, squareform
+import tensorflow as tf
+
 
 def makeT(cp):
     # cp: [K x 2] control points
@@ -144,3 +141,28 @@ def spec_augment(spec, param):
     # spec_masked = ((spec_zero * mask_t).T * mask_f).T
 
     return spec_masked
+
+
+def power_to_db(S, amin=1e-16, top_db=80.0):
+    """Convert a power-spectrogram (magnitude squared) to decibel (dB) units.
+    Computes the scaling ``10 * log10(S / max(S))`` in a numerically
+    stable way.
+    Based on:
+    https://librosa.github.io/librosa/generated/librosa.core.power_to_db.html
+    """
+
+    def _tf_log10(x):
+        numerator = tf.math.log(x)
+        denominator = tf.math.log(tf.constant(10, dtype=numerator.dtype))
+        return numerator / denominator
+
+    # Scale magnitude relative to maximum value in S. Zeros in the output
+    # correspond to positions where S == ref.
+    ref = tf.reduce_max(S)
+
+    log_spec = 10.0 * _tf_log10(tf.maximum(amin, S))
+    log_spec -= 10.0 * _tf_log10(tf.maximum(amin, ref))
+
+    log_spec = tf.maximum(log_spec, tf.reduce_max(log_spec) - top_db)
+
+    return log_spec
