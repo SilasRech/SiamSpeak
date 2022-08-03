@@ -198,7 +198,6 @@ def parse_tfr_element(element, phase, model=None):
             }
             content = tf.io.parse_single_example(element, data)
 
-
             height = content['height']
             width = content['width']
             label = content['label']
@@ -213,17 +212,6 @@ def parse_tfr_element(element, phase, model=None):
 
             return raw_audio1, raw_audio2, label
         else:
-
-            #weight_matrix_mel = tf.signal.linear_to_mel_weight_matrix(
-            #    num_mel_bins=20,
-            #    num_spectrogram_bins=129,
-            #    sample_rate=16000,
-            #    lower_edge_hertz=125.0,
-            #    upper_edge_hertz=3800.0,
-            #    dtype=tf.dtypes.float32,
-            #    name=None
-            #)
-
             data = {
                 'height': tf.io.FixedLenFeature([], tf.int64),
                 'raw_audio1': tf.io.FixedLenFeature([], tf.string),
@@ -231,74 +219,85 @@ def parse_tfr_element(element, phase, model=None):
             }
             content = tf.io.parse_single_example(element, data)
 
-            height = content['height']
             label = content['label']
             audio = content['raw_audio1']
 
             audio = tf.io.parse_tensor(audio, out_type=tf.float32)
-            #spectrogram = tf.signal.stft(audio,
-            #                            512,
-            #                            512,
-            #                            fft_length=1024,
-            #                            window_fn=tf.signal.hann_window)
 
-            #mel_spec = tf.tensordot(spectrogram, weight_matrix_mel)
-
-            #mel_spec_db = power_to_db(mel_spec)
-
-            spectrogram = tfio.audio.spectrogram(
-                audio, nfft=1024, window=512, stride=512)
+            spectrogram = tfio.audio.spectrogram(tf.squeeze(audio), nfft=2040, window=256, stride=256)
 
             mel_spectrogram = tfio.audio.melscale(
-                spectrogram, rate=16000, mels=128, fmin=0, fmax=8000)
+                spectrogram, rate=22050, mels=128, fmin=0, fmax=8000)
+
             dbscale_mel_spectrogram = tfio.audio.dbscale(
                 mel_spectrogram, top_db=80)
 
-            raw_audio1 = tf.expand_dims(tfio.audio.freq_mask(dbscale_mel_spectrogram, param=10), axis=2)
-            raw_audio2 = tf.expand_dims(tfio.audio.time_mask(dbscale_mel_spectrogram, param=10), axis=2)
+            spec1 = dbscale_mel_spectrogram[:len(dbscale_mel_spectrogram) // 2, :]
+            spec2 = dbscale_mel_spectrogram[len(dbscale_mel_spectrogram) // 2:, :]
+
+            spec1 = spec1[:96, :]
+            spec2 = spec2[:96, :]
+            #
+            raw_audio1 = tf.expand_dims(tfio.audio.freq_mask(spec1, param=10), axis=2)
+            raw_audio2 = tf.expand_dims(tfio.audio.time_mask(spec2, param=10), axis=2)
+
+            label = tf.one_hot(label, depth=40)
 
             return raw_audio1, raw_audio2, label
     else:
-
         data = {
-            'height': tf.io.FixedLenFeature([], tf.int64),
-            'raw_audio1': tf.io.FixedLenFeature([], tf.string),
-            'label': tf.io.FixedLenFeature([], tf.int64),
+        'height': tf.io.FixedLenFeature([], tf.int64),
+        'raw_audio1': tf.io.FixedLenFeature([], tf.string),
+        'label': tf.io.FixedLenFeature([], tf.int64),
         }
         content = tf.io.parse_single_example(element, data)
 
-        height = content['height']
         label = content['label']
-        raw_audio1 = content['raw_audio1']
+        audio = content['raw_audio1']
 
-        raw_audio1 = tf.io.parse_tensor(raw_audio1, out_type=tf.float32)
+        audio = tf.io.parse_tensor(audio, out_type=tf.float32)
 
-        spectrogram = tfio.audio.spectrogram(
-            raw_audio1, nfft=1024, window=512, stride=512)
+        spectrogram = tfio.audio.spectrogram(tf.squeeze(audio), nfft=2040, window=256, stride=256)
 
         mel_spectrogram = tfio.audio.melscale(
-            spectrogram, rate=16000, mels=128, fmin=0, fmax=8000)
+            spectrogram, rate=22050, mels=128, fmin=0, fmax=8000)
+
         dbscale_mel_spectrogram = tfio.audio.dbscale(
             mel_spectrogram, top_db=80)
 
-        #dbscale_mel_spectrogram = tf.reshape(dbscale_mel_spectrogram, (1, 108, 128, 1))
-        x_train = tf.reshape(dbscale_mel_spectrogram, (108, 128, 1))
+        spec1 = dbscale_mel_spectrogram[:len(dbscale_mel_spectrogram) // 2, :]
 
-        #x_train = model(dbscale_mel_spectrogram)
+        spec1 = spec1[:96, :]
+        #
+        raw_audio1 = tf.expand_dims(spec1, axis=2)
 
-        label = tf.squeeze(tf.one_hot(label, 40))
+        label = tf.one_hot(label, depth=40)
+        return raw_audio1, label
 
-        return x_train, label
 
-
-def get_dataset(files):
+def get_dataset(files, SHUFFLE_BUFFER_SIZE=100, BATCH_SIZE=20):
     # create the dataset
     dataset = tf.data.TFRecordDataset(files, num_parallel_reads=4)
 
     # pass every single feature through our mapping function
     dataset = dataset.map(lambda x: parse_tfr_element(x, "train"), num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-    return dataset
+    return dataset.shuffle(SHUFFLE_BUFFER_SIZE).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
+
+def get_test_dataset(tfrecord_files_test, model, SHUFFLE_BUFFER_SIZE=100, BATCHSIZE=25):
+    tfrecord_files_class_train = tfrecord_files_test[:3]
+    tfrecord_files_class_eval = tfrecord_files_test[-1]
+
+    test_dataset = tf.data.TFRecordDataset(tfrecord_files_class_train)
+    validation_dataset = tf.data.TFRecordDataset(tfrecord_files_class_eval)
+
+    test_dataset = test_dataset.map(lambda x: parse_tfr_element(x, phase='eval', model=model)).shuffle(
+        SHUFFLE_BUFFER_SIZE).batch(BATCHSIZE).prefetch(tf.data.AUTOTUNE)
+    validation_dataset = validation_dataset.map(lambda x: parse_tfr_element(x, phase='eval', model=model)).shuffle(
+        SHUFFLE_BUFFER_SIZE).batch(BATCHSIZE).prefetch(tf.data.AUTOTUNE)
+
+    return test_dataset, validation_dataset
 
 
 def get_id(path):
@@ -316,12 +315,12 @@ if __name__ == "__main__":
 
     write_spectrum = False
 
-    dev_train = "X:/sounds/VoxCeleb/vox1_dev_wav/wav/**/*.wav"
-    #dev_test = "X:/sounds/VoxCeleb/vox1_test_wav/wav/**/*.wav"
+    #dev_train = "X:/sounds/VoxCeleb/vox1_dev_wav/wav/**/*.wav"
+    dev_test = "X:/sounds/VoxCeleb/vox1_test_wav/wav/**/*.wav"
     speaker_list = 'speaker_files.txt'
 
     audio_length = 2.5
-    files = list_audio_files(False, dev_train)
+    files = list_audio_files(False, dev_test)
     random.shuffle(files)
 
     print('Found {} files'.format(len(files)))
@@ -339,5 +338,5 @@ if __name__ == "__main__":
             print("------------ Writing Audio Files to TFRecord --------------")
             print('Writing TFRecord file {} of {}'.format(k+1, len(files)//tffilesize ))
             one_TFfile = files[k*tffilesize:(k+1)*tffilesize]
-            write_images_to_tfr_audio(one_TFfile, 'C:/Users/rechs1/VoxCelebTFRecordsAudio/TFRecordAudioSet{}'.format(k))
+            write_images_to_tfr_audio(one_TFfile, 'C:/Users/rechs1/VoxCelebTFRecordAudioTest/TFRecordAudioSet{}'.format(k))
         test = 1

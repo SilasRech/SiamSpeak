@@ -54,51 +54,51 @@ def stacked_ResBlocks(x):
     return x
 
 
-def backbone(input):
+def backbone(input, dense_num):
 
     x = tf.keras.layers.Conv2D(64, kernel_size=(3, 3), strides=(1, 1), padding="same")(input)
-    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.BatchNormalization(axis=3)(x)
     x = tf.keras.layers.Activation("relu")(x)
     x = stacked_ResBlocks(x)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Flatten()(x)
+    output = tf.keras.layers.GlobalAveragePooling2D()(x)
 
-    # MLP Projection Layer
-    x = tf.keras.layers.Dense(2048, activation='relu')(x)
+    return output
+
+
+def build_network(input_a, dense_num):
+    """"
+    input_a: Input dimension for the first layer in the network
+    dense_num: Output dimensionality for projection and prediction layer (and final output)
+
+    returns last layer of the output
+    """
+
+    # Backbone is a ResNet50 architecture
+    output1 = backbone(input_a, dense_num)
+
+    return output1
+
+
+def projection_layer(input, output_dimension):
+    x = tf.keras.layers.Dense(output_dimension, use_bias=False)(input)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(2048, activation='relu')(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.Dense(output_dimension)(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(2048)(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.Dense(output_dimension)(x)
     output = tf.keras.layers.BatchNormalization()(x)
 
     return output
 
 
-def prediction_net(input):
-    input_a = tf.keras.Input(shape=input)
-    prediction_layer = tf.keras.layers.Dense(2048, activation='relu')(input_a)
-    prediction_layer = tf.keras.layers.BatchNormalization()(prediction_layer)
-    prediction_layer = tf.keras.layers.Dense(2048, name="OutputPrediction", dtype='float32')(prediction_layer)
+def prediction_layer(input, output_dimension):
 
-    return tf.keras.Model(input_a, prediction_layer)
+    proj1 = tf.keras.layers.Dense(output_dimension, name="OutputProjection", use_bias=False)(input)
 
+    proj_output = tf.keras.layers.Dense(output_dimension // 4)(proj1)
+    prediction_layer = tf.keras.layers.BatchNormalization()(proj_output)
+    prediction_layer = tf.keras.layers.Activation('relu')(prediction_layer)
+    prediction_layer = tf.keras.layers.Dense(output_dimension, name="OutputPrediction")(prediction_layer)
 
-def projection_net(input):
-
-    prediction_layer1 = tf.keras.layers.Dense(2048, activation='relu')(input)
-    prediction_layer1 = tf.keras.layers.BatchNormalization()(prediction_layer1)
-    pred1 = tf.keras.layers.Dense(2048, name="OutputPrediction1", dtype='float32')(prediction_layer1)
-
-    return pred1
-
-
-def build_network(input_a):
-
-    output1 = backbone(input_a)
-    proj_output = projection_net(output1)
-
-    return proj_output
-
-
-
-
+    return prediction_layer

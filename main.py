@@ -2,12 +2,18 @@ import glob
 import os, datetime
 import matplotlib.pyplot as plt
 import numpy as np
-import siamese_network as sn
+
 import tensorboard
 import tensorflow as tf
+from tools import evaluate_model
 from tensorflow.keras import mixed_precision
-from TFRecordsFunctions import get_dataset, parse_tfr_element
-from siamese_network import prediction_net
+from TFRecordsFunctions import get_dataset, get_test_dataset
+import tensorflow_io as tfio
+from tensorflow.python.framework.ops import disable_eager_execution
+
+
+from siamese_network import build_network, projection_layer, prediction_layer
+from debugging import plot_sample_preprocessing, plot_sample_input_training, networkout_to_numpy, plot_std_mean_network_output, plot_PCA, plot_TSNE, plot_classes
 
 
 def calculate_accuracy(y_pred, y_true):
@@ -17,19 +23,25 @@ def calculate_accuracy(y_pred, y_true):
 
 def neg_cosine_similarity(p, z):
 
-    z = tf.stop_gradient(z)
     p = tf.math.l2_normalize(p, axis=1)
-    z = tf.math.l2_normalize(z, axis=1)
+    z = tf.stop_gradient(tf.math.l2_normalize(z, axis=1))
 
     product = tf.math.reduce_sum(tf.math.multiply(p, z), axis=1)
 
     return -tf.math.reduce_mean(product)
 
 
-@tf.function(jit_compile=True)
+# def full_loss(pred1, pred2, output1, output2, class1, class2, y):
+@tf.function
 def full_loss(pred1, pred2, output1, output2):
 
-    return tf.keras.losses.cosine_similarity(pred1, output2, axis=1) / 2 + tf.keras.losses.cosine_similarity(pred2, output1, axis=1) / 2
+    siamese_loss = tf.keras.losses.cosine_similarity(pred1, tf.stop_gradient(output2), axis=1) / 2 + tf.keras.losses.cosine_similarity(pred2, tf.stop_gradient(output1), axis=1) / 2
+
+    #categorical_loss1 = tf.keras.losses.categorical_crossentropy(class1, y) / 2
+    #categorical_loss2 = tf.keras.losses.categorical_crossentropy(class2, y) / 2
+
+    #return -1 * siamese_loss + 0.5 * (categorical_loss1 + categorical_loss2)
+    return siamese_loss
 
 
 def full_loss_v2(pred1, pred2, output1, output2):
@@ -37,55 +49,52 @@ def full_loss_v2(pred1, pred2, output1, output2):
     return neg_cosine_similarity(pred1, output2) / 2 + neg_cosine_similarity(pred2, output1) / 2
 
 
-def linear_prediction(input_shape):
-    input_a = tf.keras.Input(shape=input_shape)
-    # MLP Projection Layer
-    x = tf.keras.layers.Dense(512, activation='relu')(input_a)
-    x = tf.keras.layers.BatchNormalization()(x)
-    pred_class = tf.keras.layers.Dense(40, activation='softmax')(x)
+@tf.function
+def train_step1(x1, x2, loss):
+    with tf.GradientTape() as tape:
+        pred1, out1 = model(x1, training=True)
+        pred2, out2 = model(x2, training=True)
+        loss = loss(pred1, pred2, out1, out2)
+    gradients = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-    return tf.keras.Model(inputs=input_a, outputs=pred_class)
+    std = 0.5 * tf.math.reduce_std(tf.math.l2_normalize(out1, axis=1), axis=1) + 0.5 * tf.math.reduce_std(tf.math.l2_normalize(out2, axis=1))
+
+    return loss, std
 
 
 class CustomModel(tf.keras.Model):
-    def compile(self, optimizer, my_loss):
+    def compile(self, optimizer, loss, metric):
         super().compile(optimizer)
-        self.my_loss = my_loss
+        self.loss = loss
+        self.metric = metric
 
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
         x1, x2, y = data
 
-        with tf.GradientTape() as tape:
-            out1 = self(x1, training=True)  # Forward pass
-            out2 = self(x2, training=True)  # Forward pass
-
-            pred1 = pred_net(out1, training=True)
-            pred2 = pred_net(out2, training=True)
-
-            # Compute the loss value
-            # (the loss function is configured in `compile()`)
-            loss = self.my_loss(pred1, pred2, out1, out2)
-            #scaled_loss = self.optimizer.get_scaled_loss(loss)
-        # Compute gradients
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-        #grads = self.optimizer.get_unscaled_gradients(gradients)
-        # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        loss, std = train_step1(x1, x2, self.loss)
         # Update metrics (includes the metric that tracks the loss)
         loss_tracker.update_state(loss)
+        train_acc_metric.update_state(std)
         # Return a dict mapping metric names to current value
-        return {"loss": loss_tracker.result()}
+        return {"loss": loss_tracker.result(), "std": train_acc_metric.result()}
 
 
 if __name__ == "__main__":
 
     log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    audio_path = 'X:/sounds/VoxCeleb/vox1_dev_wav/wav/id10743/N94AAE1xEuE/00001.wav'
+    model_name = 'SiameseNetwork_All_Losses'
 
-    DEBUG = 1
+    DEBUG = 0
+
+    if DEBUG:
+        plot_sample_preprocessing(audio_path)
+
     train_siamese = True
+
     # Settings for Extraction
     audio_length = 2.5
     window_length = 512
@@ -93,149 +102,119 @@ if __name__ == "__main__":
 
     # Settings for Training
     EPOCHS = 100
+    OUTPUT_DIMENSION = 2048
 
-    #test_database = ["X:/sounds/VoxCeleb/vox1_dev_wav/wav/id10001/1zcIwhmdeo4/00001.wav"]
-
-    #tfrecord_files = glob.glob('C:/Users/rechs1/VoxCelebClean/*.tfrecords')
+    loss_tracker = tf.keras.metrics.Mean(name="loss")
+    train_acc_metric = tf.keras.metrics.Mean()
 
     if "scratch" in os.getcwd():
         tfrecord_files = glob.glob('/scratch/work/rechs1/VoxCelebTFRecordsAudio/*.tfrecords')
-        BATCH_SIZE = 256
+        BATCH_SIZE = 128
         SHUFFLE_BUFFER_SIZE = 10
-        mixed_precision.set_global_policy('mixed_float16')
+        #mixed_precision.set_global_policy('mixed_float16')
 
         print('Starting training on cluster')
     else:
         tfrecord_files = glob.glob('C:/Users/rechs1/VoxCelebTFRecordsAudio/*.tfrecords')
-        BATCH_SIZE = 20
+        tfrecord_files = tfrecord_files[:5]
+        BATCH_SIZE = 24
         SHUFFLE_BUFFER_SIZE = 10
         #mixed_precision.set_global_policy('mixed_float16')
 
-        if DEBUG:
-            print('Debugging Mode is turned on')
-            tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
-            modelcheckpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-                'SiameseNetwork',
-                monitor="loss",
-                verbose=1,
-                save_best_only=True,
-                save_weights_only=False,
-                mode="auto",
-                save_freq="epoch",
-            )
+        tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1, profile_batch='500,520')
+        print('Debugging Mode is turned on')
+        modelcheckpoint = tf.keras.callbacks.ModelCheckpoint(
+            "C:/Users/rechs1/PycharmProjects/SiamSpeak/modelcheckpoint",
+            monitor="loss",
+            verbose=0,
+            save_best_only=True,
+            save_weights_only=False,
+            mode="auto",
+            save_freq="epoch",
+        )
 
-        else:
-            tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+        # , profile_batch=(50, 100)
 
     if train_siamese:
-        tfrecord_files = tfrecord_files[:5]
-        #tfrecord_files = 'C:/Users/rechs1/VoxCelebClean/VoxCeleb_Set0.tfrecords'
 
-        # Parameters for training the siamese network
-
-        input_shape = (108, 128, 1)
-        input_a = tf.keras.Input(shape=input_shape)
-
-        # Get training data
-        train_dataset = get_dataset(tfrecord_files).shuffle(SHUFFLE_BUFFER_SIZE).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        learning_rate = 0.05 * BATCH_SIZE / 256
+        lr_decayed_fn = tf.keras.optimizers.schedules.CosineDecay(learning_rate, 1000)
+        optimizer = tf.keras.optimizers.SGD(learning_rate=lr_decayed_fn, momentum=0.9)
 
         if DEBUG:
-            test = train_dataset.take(1)
-            for x1,x2, y in test.as_numpy_iterator():
-                plt.imshow(x1[0])
-                plt.show()
-                print(x1.shape, y)
+            tfrecord_files_test = glob.glob('C:/Users/rechs1/VoxCelebTFRecordAudioTest/*.tfrecords')
+            tfrecord_files = tfrecord_files_test[:3]
+
+        # Parameters for training the siamese network
+        input_a = tf.keras.Input(shape=(96, 128, 1))
+
+        # Get training data
+        train_dataset = get_dataset(tfrecord_files, SHUFFLE_BUFFER_SIZE, BATCH_SIZE)
+
+        if DEBUG:
+            plot_sample_input_training(train_dataset)
 
         # Build network
-        proj_output = sn.build_network(input_a)
-        pred_net = prediction_net((2048))
+        resnet_out = build_network(input_a, OUTPUT_DIMENSION)
+
+        proj1 = projection_layer(resnet_out, OUTPUT_DIMENSION)
+        pred1 = prediction_layer(proj1, OUTPUT_DIMENSION)
 
         print('-----------------------Training Starting---------------------')
 
-        loss_tracker = tf.keras.metrics.Mean(name="loss")
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
+        model = CustomModel(input_a, [pred1, proj1])
 
-        model = CustomModel(input_a, proj_output)
-        model.compile(optimizer=optimizer, my_loss=full_loss)
+        model.compile(optimizer=optimizer, loss=full_loss, metric=train_acc_metric)
 
         if DEBUG:
             model.summary()
 
         if "scratch" not in os.getcwd():
-            model.fit(x=train_dataset, epochs=EPOCHS, verbose='auto', callbacks=[tensorboard_callback, modelcheckpoint_callback])
+            model.fit(x=train_dataset, epochs=EPOCHS, verbose=1, callbacks=[tensorboard_callback, modelcheckpoint])
         else:
-            model.fit(x=train_dataset, epochs=EPOCHS, verbose='auto')
+            model.fit(x=train_dataset, epochs=EPOCHS, verbose=1)
 
-        model.save('SiameseNetwork')
-
+        model.save(model_name)
+        print('Model successfully saved under the name: {}'.format(model_name))
     #
     else:
-        model = tf.keras.models.load_model('SiameseNetwork', custom_objects={'full_loss': full_loss})
+        model = tf.keras.models.load_model('SiameseNetwork_All_Losses', custom_objects={'full_loss': full_loss})
         #model.summary()
 
     load_testSet = True
 
     # Load Test Set
-    if load_testSet:
-        tfrecord_files_test = glob.glob('C:/Users/rechs1/VoxCelebTFRecordAudioTest/*.tfrecords')
 
-        tfrecord_files_class_train = tfrecord_files_test[:3]
-        tfrecord_files_class_eval = tfrecord_files_test[-1]
-
-        test_dataset = tf.data.TFRecordDataset(tfrecord_files_class_train)
-        validation_dataset = tf.data.TFRecordDataset(tfrecord_files_class_eval)
-
-        test_dataset = test_dataset.map(lambda x: parse_tfr_element(x, phase='eval', model=model)).shuffle(SHUFFLE_BUFFER_SIZE).batch(1).prefetch(tf.data.AUTOTUNE)
-        validation_dataset = validation_dataset.map(lambda x: parse_tfr_element(x, phase='eval', model=model)).shuffle(
-            SHUFFLE_BUFFER_SIZE).batch(1).prefetch(
-            tf.data.AUTOTUNE)
-
-        validation_dataset_prediction = []
-        test_dataset_prediction = []
-        test_dataset_numpy_labels = []
-        validation_dataset_numpy_labels = []
-        for data, labels in test_dataset:
-            test_dataset_numpy_labels.append(labels.numpy())
-            test_dataset_prediction.append(model.predict(data, verbose=0))
-
-        test_dataset_numpy_labels = np.array(test_dataset_numpy_labels)
-        test_dataset_prediction = np.array(test_dataset_prediction)
-
-        for data, labels in validation_dataset:
-            validation_dataset_numpy_labels.append(labels.numpy())
-            validation_dataset_prediction.append(model.predict(data, verbose=0))
-
-        validation_dataset_numpy_labels = np.array(validation_dataset_numpy_labels)
-        validation_dataset_prediction = np.array(validation_dataset_prediction)
-
-        np.savez('C:/Users/rechs1/VoxCelebTFRecordAudioTest/TestClassifier.npz', x_train=test_dataset_prediction, y_train=test_dataset_numpy_labels, x_eval=validation_dataset_prediction, y_eval=validation_dataset_numpy_labels)
-    else:
-
-        test_zip = np.load('C:/Users/rechs1/VoxCelebTFRecordAudioTest/TestClassifier.npz')
-
-        test_dataset_prediction = test_zip['x_train']
-        test_dataset_numpy_labels = test_zip['y_train']
-        validation_dataset_numpy_labels = test_zip['y_eval']
-        validation_dataset_prediction = test_zip['x_eval']
-
-    # Build and train classification layer
-    simple_predictor = linear_prediction(input_shape=(1, 2048))
-
-    opt = tf.keras.optimizers.Adam(learning_rate=0.001)
-    simple_predictor.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    tfrecord_files_test = glob.glob('C:/Users/rechs1/VoxCelebTFRecordAudioTest/*.tfrecords')
+    test_dataset, validation_dataset = get_test_dataset(tfrecord_files_test, model, SHUFFLE_BUFFER_SIZE=100, BATCHSIZE=50)
 
     if DEBUG:
-        simple_predictor.summary()
 
-    simple_predictor.fit(test_dataset_prediction, test_dataset_numpy_labels, validation_data=[validation_dataset_prediction, validation_dataset_numpy_labels], shuffle=True, epochs=10, batch_size=50)
+        siamese_predictions, labels = networkout_to_numpy(test_dataset, model, OUTPUT_DIMENSION=2048)
+        plot_std_mean_network_output(siamese_predictions, labels)
+        plot_PCA(siamese_predictions, labels)
+        plot_TSNE(siamese_predictions, labels)
 
-    accuracy_test = simple_predictor.predict(validation_dataset_prediction)
-    accuracy_test = np.squeeze(accuracy_test)
-    new_mat = np.zeros(accuracy_test.shape)  # our zeros and ones will go here
+    # Build and train classification layer
+    model.trainable = False
 
-    y_pred = np.argmax(np.squeeze(validation_dataset_numpy_labels), axis=1)
-    accuracy_test1 = np.argmax(accuracy_test, axis=1)
-    accuracy = np.mean(y_pred == accuracy_test1)
-    print('Classfication Accuracy is {}'.format(accuracy))
+    last_output = model.get_layer('OutputPrediction').output
+    x = tf.keras.layers.Dense(512, activation='relu', name='Dense_Class1')(last_output)
+    pred_class = tf.keras.layers.Dense(40, activation='softmax', name='Dense_Class')(x)
+
+    classification_model = tf.keras.Model(model.input, pred_class)
+
+    opt = tf.keras.optimizers.Adam(learning_rate=0.002)
+    classification_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+
+    if DEBUG:
+        classification_model.summary()
+
+    classification_model.fit(test_dataset, shuffle=True, epochs=15, batch_size=50)
+
+    prediction, label = evaluate_model(classification_model, validation_dataset)
+
+    if DEBUG:
+        plot_classes(prediction, label)
 
     x = 1

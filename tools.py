@@ -4,6 +4,28 @@ import numpy.linalg as nl
 from scipy import interpolate
 from scipy.spatial.distance import pdist, cdist, squareform
 import tensorflow as tf
+import math
+
+def evaluate_model(model, dataset):
+    prediction = []
+    label = []
+    for x1, y in dataset.as_numpy_iterator():
+        test1 = np.argmax(model.predict(x1), axis=1)
+
+        prediction.append(test1)
+        label.append((np.argmax(y, axis=1)))
+
+    prediction = np.asarray(prediction).flatten()
+    label = np.asarray(label).flatten()
+
+    accuracy = np.mean(y_pred == label) * 100
+    print('Classfication Accuracy is {}'.format(accuracy))
+
+    return prediction, label
+
+def mel_to_freq(m):
+
+    return 700*(math.exp((m/1127))-1)
 
 
 def makeT(cp):
