@@ -6,6 +6,70 @@ from scipy.spatial.distance import pdist, cdist, squareform
 import tensorflow as tf
 import math
 
+
+def get_input_shape(dataset, phase='train'):
+    example = dataset.take(1)
+    if phase == 'train':
+        for spec1, spec2, y in example.as_numpy_iterator():
+            input_shape = spec1.shape
+    else:
+        for spec1 in example.as_numpy_iterator():
+            input_shape = spec1.shape
+
+    return input_shape
+
+
+def EER(clients, impostors):
+    threshold = np.arange(-1, 1, 0.1) #[-0.5,-0.4,-0.3,-0.2,-0.1,0.,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]
+    FAR = []
+    FRR = []
+    for th in threshold:
+        far = 0.0
+        for score in impostors:
+            if score.item() > float(th):
+                far += 1
+        frr = 0.0
+        for score in clients:
+            if score.item() <= float(th):
+                frr += 1
+        FAR.append(far/impostors.size)
+        FRR.append(frr/clients.size)
+    ERR = 0.
+    dist = 1.
+    for far, frr in zip(FAR, FRR):
+        if abs(far-frr) < dist:
+            ERR = (far+frr)/2
+            dist = abs(far-frr)
+    return float("{0:.3f}".format(100*ERR))
+
+
+def calculate_EER(scores):
+
+    #lst = open(filename,'r')
+
+    #scores = []
+    #lines = lst.readlines()
+    #for x in lines:
+    #    scores.append(np.float(x.split()[0]))
+
+    c = np.array(scores[0::2])
+    i = np.array(scores[1::2])
+
+    print('EER is : %.3f' % EER(c, i))
+
+
+def read_trials(list):
+    name1 = []
+    name2 = []
+    label = []
+    lines = list.readlines()
+    for x in lines:
+        name1.append(x.split()[0])
+        name2.append(x.split()[1])
+        label.append(x.split()[2])
+    return name1, name2, label
+
+
 def evaluate_model(model, dataset):
     prediction = []
     label = []
@@ -27,7 +91,6 @@ def mel_to_freq(m):
 
     return 700*(math.exp((m/1127))-1)
 
-
 def makeT(cp):
     # cp: [K x 2] control points
     # T: [(K+3) x (K+3)]
@@ -44,6 +107,18 @@ def makeT(cp):
     np.fill_diagonal(R, 0)
     T[:K, 3:] = R
     return T
+
+
+def read_trials(list):
+    name1 = []
+    name2 = []
+    label = []
+    lines = list.readlines()
+    for x in lines:
+        name1.append(x.split()[0])
+        name2.append(x.split()[1])
+        label.append(x.split()[2])
+    return name1, name2, label
 
 
 def liftPts(p, cp):

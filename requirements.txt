@@ -1,7 +1,7 @@
 matplotlib
-
+librosa
 tensorflow_io
 tensorflow
 numpy
-os
-glob
+scipy
+scikit-learn
